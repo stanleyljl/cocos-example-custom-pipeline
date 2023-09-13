@@ -85,61 +85,94 @@ class GPUDrivenPipeline implements rendering.PipelineBuilder {
                     camera,
                     new rendering.LightInfo(),
                     rendering.SceneFlags.BLEND);
+            pass.showStatistics = true;
         }
 
+    /**
+     *  1, Two pass occlusion culling:
+     *  compute
+     *  render gpu opaque
+     *  render old opaque
+     *  hiz generation
+     *  
+     *  compute
+     *  render gpu opaque
+     *  render gpu transparent
+     *  render old transparent
+     *  hiz generation
+     *  
+     *  2, No occlusion culling:
+     *  compute
+     *  render gpu opaque
+     *  render old opaque
+     *  render gpu transparent
+     *  render old transparent
+     */
     private addGPUDrivenPass(ppl: rendering.Pipeline,
         cullingID: number,
         camera: renderer.scene.Camera,
         id: number,
         width: number,
         height: number, 
-        bUseOcclusion: boolean,
-        bMainPass: boolean): void {
-        const hzbName = bUseOcclusion ? 'HiZBuffer' : '';
-        ppl.addBuiltinGpuCullingPass(cullingID, camera, hzbName, null, bMainPass);
-
-        const pass = ppl.addRenderPass(width, height, 'default');
-        pass.setViewport(this._viewport);
-        if (camera.clearFlag & gfx.ClearFlagBit.COLOR) {
-            pass.addRenderTarget(`Color${id}`, gfx.LoadOp.CLEAR, gfx.StoreOp.STORE, this._clearColor);
-        } else if (camera.clearFlag & renderer.scene.SKYBOX_FLAG) {
-            pass.addRenderTarget(`Color${id}`, gfx.LoadOp.DISCARD);
-        } else {
-            pass.addRenderTarget(`Color${id}`, gfx.LoadOp.LOAD);
-        }
-        if (camera.clearFlag & gfx.ClearFlagBit.DEPTH_STENCIL) {
-            pass.addDepthStencil(
-                this._depthStencil,
-                bMainPass ? gfx.LoadOp.CLEAR : gfx.LoadOp.LOAD,
-                gfx.StoreOp.STORE,
-                camera.clearDepth,
-                camera.clearStencil,
-                camera.clearFlag & gfx.ClearFlagBit.DEPTH_STENCIL);
-        } else {
-            pass.addDepthStencil(this._depthStencil, gfx.LoadOp.LOAD);
-        }
+        layoutPath: string): void {
         
-        pass.addQueue(rendering.QueueHint.NONE)
-            .addSceneOfCamera(
-                camera,
-                new rendering.LightInfo(),
-                rendering.SceneFlags.OPAQUE | rendering.SceneFlags.MASK | rendering.SceneFlags.GPU_DRIVEN, cullingID);
+        const hzbName = 'HiZBuffer';
+        const passCount = hzbName.length > 0 ? 2 : 1;
+        for (let passIndex = 0; passIndex < passCount; passIndex++) {
+            const bMainPass = (passIndex == 0);
 
-        if (bMainPass) {
+            ppl.addBuiltinGpuCullingPass(cullingID, camera, layoutPath, hzbName, null, bMainPass);
+
+            const pass = ppl.addRenderPass(width, height, 'default');
+            pass.setViewport(this._viewport);
+            if (camera.clearFlag & gfx.ClearFlagBit.COLOR) {
+                pass.addRenderTarget(`Color${id}`, gfx.LoadOp.CLEAR, gfx.StoreOp.STORE, this._clearColor);
+            } else if (camera.clearFlag & renderer.scene.SKYBOX_FLAG) {
+                pass.addRenderTarget(`Color${id}`, bMainPass ? gfx.LoadOp.DISCARD : gfx.LoadOp.LOAD);
+            } else {
+                pass.addRenderTarget(`Color${id}`, gfx.LoadOp.LOAD);
+            }
+            if (camera.clearFlag & gfx.ClearFlagBit.DEPTH_STENCIL) {
+                pass.addDepthStencil(
+                    this._depthStencil,
+                    bMainPass ? gfx.LoadOp.CLEAR : gfx.LoadOp.LOAD,
+                    gfx.StoreOp.STORE,
+                    camera.clearDepth,
+                    camera.clearStencil,
+                    camera.clearFlag & gfx.ClearFlagBit.DEPTH_STENCIL);
+            } else {
+                pass.addDepthStencil(this._depthStencil, gfx.LoadOp.LOAD);
+            }
+
+            if (bMainPass) {
+                pass.addQueue(rendering.QueueHint.NONE)
+                    .addSceneOfCamera(
+                        camera,
+                        new rendering.LightInfo(),
+                        rendering.SceneFlags.OPAQUE | rendering.SceneFlags.MASK);
+            }
+
             pass.addQueue(rendering.QueueHint.NONE)
-            .addSceneOfCamera(
-                camera,
-                new rendering.LightInfo(),
-                rendering.SceneFlags.OPAQUE | rendering.SceneFlags.MASK);
-        } else {
-            pass.addQueue(rendering.QueueHint.BLEND)
-            .addSceneOfCamera(
-                camera,
-                new rendering.LightInfo(),
-                rendering.SceneFlags.BLEND);
-        }
+                .addSceneOfCamera(
+                    camera,
+                    new rendering.LightInfo(),
+                    rendering.SceneFlags.OPAQUE | rendering.SceneFlags.MASK | rendering.SceneFlags.GPU_DRIVEN, cullingID);
 
-        if (bUseOcclusion) {
+            pass.addQueue(rendering.QueueHint.BLEND)
+                .addSceneOfCamera(
+                    camera,
+                    new rendering.LightInfo(),
+                    rendering.SceneFlags.BLEND | rendering.SceneFlags.GPU_DRIVEN, cullingID);
+            
+            if (!bMainPass) {
+                pass.addQueue(rendering.QueueHint.BLEND)
+                    .addSceneOfCamera(
+                        camera,
+                        new rendering.LightInfo(),
+                        rendering.SceneFlags.BLEND);
+                pass.showStatistics = true;
+            }
+
             const targetHzbName = hzbName + String(cullingID);
             ppl.addBuiltinHzbGenerationPass(this._depthStencil, targetHzbName);
         }
@@ -165,11 +198,7 @@ class GPUDrivenPipeline implements rendering.PipelineBuilder {
         this._viewport.height = camera.viewport.w * height;
 
         if (this._gpuDrivenEnabled) {
-            // add main pass
-            this.addGPUDrivenPass(ppl as rendering.Pipeline, this._cullingID, camera, id, width, height, true, true);
-
-            // add post pass
-            this.addGPUDrivenPass(ppl as rendering.Pipeline, this._cullingID, camera, id, width, height, true, false);
+            this.addGPUDrivenPass(ppl as rendering.Pipeline, this._cullingID, camera, id, width, height, 'default/default');
             this._cullingID++;
         } else {
             this.addForwardPass(ppl as rendering.Pipeline, camera, id, width, height);
